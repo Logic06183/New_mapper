@@ -15,8 +15,8 @@ A Streamlit app that helps map variables between datasets using semantic matchin
 
 ```bash
 # Clone the repository
-git clone https://github.com/Logic06183/variable-mapper.git
-cd variable-mapper
+git clone https://github.com/Logic06183/New_mapper.git
+cd New_mapper
 
 # Install dependencies
 pip install -r requirements.txt
