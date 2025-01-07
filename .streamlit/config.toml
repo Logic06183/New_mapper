@@ -9,6 +9,15 @@ font = "sans serif"
 maxUploadSize = 200
 enableXsrfProtection = true
 enableCORS = false
+maxMessageSize = 200
+enableWebsocketCompression = false
+fileWatcherType = "none"
 
 [browser]
 gatherUsageStats = false
+
+[runner]
+fastReruns = true
+
+[logger]
+level = "error"
