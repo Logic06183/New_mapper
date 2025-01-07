@@ -32,7 +32,8 @@ ENV/
 *.swo
 
 # Streamlit
-.streamlit/
+!.streamlit/
+!.streamlit/config.toml
 
 # Project specific
 mapping_feedback/
