@@ -7,239 +7,64 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.manifold import TSNE
 import os
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 import json
 from datetime import datetime
 from pathlib import Path
+import gc
+
+# Initialize session state
+if 'mapper' not in st.session_state:
+    st.session_state['mapper'] = None
+if 'data' not in st.session_state:
+    st.session_state['data'] = None
+if 'codebook' not in st.session_state:
+    st.session_state['codebook'] = None
+if 'mappings' not in st.session_state:
+    st.session_state['mappings'] = None
 
 # Set page config
-st.set_page_config(page_title="Variable Mapping Assistant", layout="wide")
+st.set_page_config(
+    page_title="Variable Mapping Assistant",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Initialize SentenceTransformer model
 @st.cache_resource
-def load_model():
+def get_sentence_transformer():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
-model = load_model()
+@st.cache_data
+def compute_embeddings(texts: List[str]) -> np.ndarray:
+    model = get_sentence_transformer()
+    return model.encode(texts, convert_to_tensor=False)
 
-def compute_embeddings(texts):
-    """Compute embeddings for a list of texts"""
-    return model.encode(texts)
-
-def plot_semantic_space(variable_embeddings, codebook_embeddings, study_doc_embeddings,
-                       variable_names, codebook_vars, doc_texts):
-    """Create interactive 3D plot of semantic space"""
-    # Combine all embeddings
-    all_embeddings = np.vstack([variable_embeddings, codebook_embeddings, study_doc_embeddings])
-    
-    # Apply t-SNE
-    tsne = TSNE(n_components=3, random_state=42)
-    embeddings_3d = tsne.fit_transform(all_embeddings)
-    
-    # Split back into separate arrays
-    n_vars = len(variable_names)
-    n_codebook = len(codebook_vars)
-    
-    var_coords = embeddings_3d[:n_vars]
-    codebook_coords = embeddings_3d[n_vars:n_vars+n_codebook]
-    doc_coords = embeddings_3d[n_vars+n_codebook:]
-    
-    # Create scatter plot
-    fig = go.Figure()
-    
-    # Add variables
-    fig.add_trace(go.Scatter3d(
-        x=var_coords[:, 0], y=var_coords[:, 1], z=var_coords[:, 2],
-        text=variable_names,
-        mode='markers',
-        name='Dataset Variables',
-        marker=dict(size=8, color='blue', opacity=0.8)
-    ))
-    
-    # Add codebook variables
-    fig.add_trace(go.Scatter3d(
-        x=codebook_coords[:, 0], y=codebook_coords[:, 1], z=codebook_coords[:, 2],
-        text=codebook_vars,
-        mode='markers',
-        name='Codebook Variables',
-        marker=dict(size=8, color='red', opacity=0.8)
-    ))
-    
-    # Add study documentation embeddings
-    fig.add_trace(go.Scatter3d(
-        x=doc_coords[:, 0], y=doc_coords[:, 1], z=doc_coords[:, 2],
-        text=doc_texts,
-        mode='markers',
-        name='Study Documentation',
-        marker=dict(size=8, color='green', opacity=0.8)
-    ))
-    
-    fig.update_layout(
-        title="3D Semantic Space Visualization",
-        scene=dict(
-            xaxis_title="t-SNE 1",
-            yaxis_title="t-SNE 2",
-            zaxis_title="t-SNE 3"
-        ),
-        width=800,
-        height=800,
-        margin=dict(l=0, r=0, b=0, t=30)
-    )
-    
-    return fig
-
-def load_data(file, file_type="dataset"):
-    """Load data from CSV or Excel file with error handling"""
+def load_file(uploaded_file, file_type="dataset"):
     try:
-        # Get file extension
-        file_extension = file.name.split('.')[-1].lower()
-        
-        if file_extension == 'csv':
-            # Try different encodings and delimiters for CSV
+        if uploaded_file.name.endswith('.csv'):
+            # Try different encodings
             encodings = ['utf-8', 'latin1', 'iso-8859-1']
-            delimiters = [',', ';', '\t']
-            
-            # Store error messages for debugging
-            errors = []
-            
             for encoding in encodings:
-                for delimiter in delimiters:
-                    try:
-                        df = pd.read_csv(
-                            file, 
-                            encoding=encoding, 
-                            sep=delimiter,
-                            on_bad_lines='warn'  # More permissive parsing
-                        )
-                        if len(df.columns) > 1:  # Check if we got meaningful data
-                            st.success(f"Successfully loaded {file_type} using {encoding} encoding and '{delimiter}' delimiter")
-                            return df
-                    except Exception as e:
-                        errors.append(f"Attempt with {encoding}, {delimiter}: {str(e)}")
-                        continue
-            
-            # If all attempts fail, try pandas' auto-detection
-            try:
-                df = pd.read_csv(file, engine='python')
-                if len(df.columns) > 1:
-                    st.success(f"Successfully loaded {file_type} using auto-detection")
-                    return df
-            except Exception as e:
-                errors.append(f"Auto-detection attempt: {str(e)}")
-            
-            # If we get here, show detailed error information
-            st.error(f"Error loading {file_type}. Attempted the following:")
-            for error in errors:
-                st.text(error)
+                try:
+                    return pd.read_csv(uploaded_file, encoding=encoding)
+                except UnicodeDecodeError:
+                    continue
+            st.error(f"Could not read {file_type} with any of the attempted encodings")
             return None
-            
-        elif file_extension in ['xls', 'xlsx']:
-            try:
-                # Try reading with default sheet
-                df = pd.read_excel(file)
-                if len(df.columns) > 1:
-                    st.success(f"Successfully loaded {file_type} from Excel file")
-                    return df
-                
-                # If first attempt fails, try listing sheets and let user choose
-                xls = pd.ExcelFile(file)
-                if len(xls.sheet_names) > 1:
-                    sheet_name = st.selectbox(
-                        f"Multiple sheets found in {file_type}. Please select one:",
-                        xls.sheet_names
-                    )
-                    df = pd.read_excel(file, sheet_name=sheet_name)
-                    if len(df.columns) > 1:
-                        st.success(f"Successfully loaded {file_type} from sheet: {sheet_name}")
-                        return df
-                
-                st.error(f"No valid data found in {file_type}")
-                return None
-                
-            except Exception as e:
-                st.error(f"Error loading Excel {file_type}: {str(e)}")
-                return None
+        elif uploaded_file.name.endswith(('.xls', '.xlsx')):
+            return pd.read_excel(uploaded_file)
         else:
-            st.error(f"Unsupported file format for {file_type}: {file_extension}")
+            st.error(f"Unsupported file format for {file_type}")
             return None
-            
     except Exception as e:
         st.error(f"Error loading {file_type}: {str(e)}")
         return None
 
-def create_3d_visualization(mappings, data, codebook):
-    """Create 3D visualization of semantic relationships"""
-    # Get embeddings for dataset variables
-    dataset_texts = [f"{var}: {var}" for var in data.columns]
-    variable_embeddings = compute_embeddings(dataset_texts)
-    
-    # Get embeddings for codebook variables
-    codebook_texts = []
-    for _, row in codebook.iterrows():
-        var_name = row[codebook.columns[0]]  # Use first column as variable name
-        description = row[codebook.columns[1]] if len(codebook.columns) > 1 else ""
-        codebook_texts.append(f"{var_name}: {description}")
-    codebook_embeddings = compute_embeddings(codebook_texts)
-    
-    # Combine all embeddings for visualization
-    all_embeddings = np.vstack([variable_embeddings, codebook_embeddings])
-    
-    # Use t-SNE for dimensionality reduction
-    tsne = TSNE(n_components=3, random_state=42)
-    embeddings_3d = tsne.fit_transform(all_embeddings)
-    
-    # Split back into separate arrays
-    n_vars = len(dataset_texts)
-    var_coords = embeddings_3d[:n_vars]
-    codebook_coords = embeddings_3d[n_vars:]
-    
-    # Create scatter plots
-    fig = go.Figure()
-    
-    # Dataset variables (blue)
-    fig.add_trace(go.Scatter3d(
-        x=var_coords[:, 0],
-        y=var_coords[:, 1],
-        z=var_coords[:, 2],
-        mode='markers+text',
-        marker=dict(size=8, color='blue', opacity=0.7),
-        text=data.columns,
-        name='Dataset Variables'
-    ))
-    
-    # Codebook variables (red)
-    fig.add_trace(go.Scatter3d(
-        x=codebook_coords[:, 0],
-        y=codebook_coords[:, 1],
-        z=codebook_coords[:, 2],
-        mode='markers+text',
-        marker=dict(size=8, color='red', opacity=0.7),
-        text=[t.split(':')[0] for t in codebook_texts],
-        name='Codebook Variables'
-    ))
-    
-    # Update layout
-    fig.update_layout(
-        title='Semantic Relationships in 3D Space',
-        scene=dict(
-            xaxis_title='X',
-            yaxis_title='Y',
-            zaxis_title='Z'
-        ),
-        width=800,
-        height=800,
-        showlegend=True
-    )
-    
-    st.plotly_chart(fig)
-
 def save_mapping_feedback(mapping: Dict[str, Any], feedback: bool):
     """Save mapping feedback to improve future matches"""
-    # Create feedback directory if it doesn't exist
     feedback_dir = "mapping_feedback"
     os.makedirs(feedback_dir, exist_ok=True)
     
-    # Load existing feedback or create new
     feedback_file = os.path.join(feedback_dir, "mapping_feedback.json")
     try:
         with open(feedback_file, 'r') as f:
@@ -247,7 +72,6 @@ def save_mapping_feedback(mapping: Dict[str, Any], feedback: bool):
     except (FileNotFoundError, json.JSONDecodeError):
         feedback_data = {"positive": [], "negative": []}
     
-    # Add new feedback
     feedback_entry = {
         "dataset_variable": mapping["dataset_variable"],
         "matches": mapping["matches"],
@@ -259,7 +83,6 @@ def save_mapping_feedback(mapping: Dict[str, Any], feedback: bool):
     else:
         feedback_data["negative"].append(feedback_entry)
     
-    # Save updated feedback
     with open(feedback_file, 'w') as f:
         json.dump(feedback_data, f, indent=2)
 
@@ -275,7 +98,6 @@ def display_mappings(mappings: List[Dict[str, Any]], data: pd.DataFrame, codeboo
         for mapping in mappings:
             var_name = mapping['dataset_variable']
             matches = mapping['matches']
-            status = mapping['status']
             
             # Create an expander for each variable
             with st.expander(f" {var_name}"):
@@ -305,12 +127,12 @@ def display_mappings(mappings: List[Dict[str, Any]], data: pd.DataFrame, codeboo
                 with col1:
                     status = st.selectbox(
                         "Status",
-                        options=["Mapped", "Unmapped"],
+                        options=[s.value for s in MappingStatus],
                         key=f"status_{var_name}"
                     )
                 
                 # Add feedback buttons
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 with col1:
                     if st.button(" Correct Match", key=f"correct_{var_name}"):
                         save_mapping_feedback(mapping, True)
@@ -322,111 +144,142 @@ def display_mappings(mappings: List[Dict[str, Any]], data: pd.DataFrame, codeboo
     
     with tab2:
         try:
-            # Create 3D visualization
             create_3d_visualization(mappings, data, codebook)
         except Exception as e:
             st.error(f"Error creating visualization: {str(e)}")
             st.error("Please ensure all required data is loaded correctly.")
 
+def create_3d_visualization(mappings, data, codebook):
+    """Create 3D visualization of semantic relationships"""
+    with st.spinner("Generating 3D visualization..."):
+        # Get embeddings for dataset variables
+        dataset_texts = [f"{var}: {var}" for var in data.columns]
+        variable_embeddings = compute_embeddings(dataset_texts)
+        
+        # Get embeddings for codebook variables
+        codebook_texts = []
+        for _, row in codebook.iterrows():
+            var_name = row[codebook.columns[0]]  # Use first column as variable name
+            description = row[codebook.columns[1]] if len(codebook.columns) > 1 else ""
+            codebook_texts.append(f"{var_name}: {description}")
+        codebook_embeddings = compute_embeddings(codebook_texts)
+        
+        # Combine all embeddings for visualization
+        all_embeddings = np.vstack([variable_embeddings, codebook_embeddings])
+        
+        # Use t-SNE for dimensionality reduction
+        tsne = TSNE(n_components=3, random_state=42)
+        embeddings_3d = tsne.fit_transform(all_embeddings)
+        
+        # Split back into separate arrays
+        n_vars = len(dataset_texts)
+        var_coords = embeddings_3d[:n_vars]
+        codebook_coords = embeddings_3d[n_vars:]
+        
+        # Create scatter plots
+        fig = go.Figure()
+        
+        # Dataset variables (blue)
+        fig.add_trace(go.Scatter3d(
+            x=var_coords[:, 0],
+            y=var_coords[:, 1],
+            z=var_coords[:, 2],
+            mode='markers+text',
+            marker=dict(size=8, color='blue', opacity=0.7),
+            text=data.columns,
+            name='Dataset Variables'
+        ))
+        
+        # Codebook variables (red)
+        fig.add_trace(go.Scatter3d(
+            x=codebook_coords[:, 0],
+            y=codebook_coords[:, 1],
+            z=codebook_coords[:, 2],
+            mode='markers+text',
+            marker=dict(size=8, color='red', opacity=0.7),
+            text=[t.split(':')[0] for t in codebook_texts],
+            name='Codebook Variables'
+        ))
+        
+        # Update layout
+        fig.update_layout(
+            title='Semantic Relationships in 3D Space',
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z'
+            ),
+            width=800,
+            height=800,
+            showlegend=True
+        )
+        
+        st.plotly_chart(fig)
+
 def main():
     st.title("Variable Mapping Assistant")
     st.markdown("""
-    This app demonstrates how study documentation enhances semantic matching for variable mapping.
-    The 3D visualization shows the semantic relationships between:
-    - Dataset variables (blue)
-    - Codebook variables (red)
-    - Study documentation context (green)
+    Upload your dataset and codebook to start mapping variables. 
+    The system will suggest matches based on semantic similarity.
     """)
-    
+
     # File upload section
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("Upload Dataset")
-        data_file = st.file_uploader(
-            "Choose a CSV or Excel file", 
-            type=["csv", "xlsx", "xls"],
-            key="data"
-        )
-        
-    with col2:
-        st.subheader("Upload Codebook")
-        codebook_file = st.file_uploader(
-            "Choose a CSV or Excel file", 
-            type=["csv", "xlsx", "xls"],
-            key="codebook"
-        )
-        
-    with col3:
-        st.subheader("Upload Study Docs")
-        study_docs = st.file_uploader(
-            "Choose documentation files", 
-            type=["pdf", "docx", "txt"],
-            accept_multiple_files=True
-        )
+        dataset = st.file_uploader("Upload Dataset (CSV or Excel)", type=['csv', 'xlsx', 'xls'])
+        if dataset:
+            st.session_state['data'] = load_file(dataset, "dataset")
+            if st.session_state['data'] is not None:
+                st.write("Dataset Preview:")
+                st.dataframe(st.session_state['data'].head())
     
-    if data_file and codebook_file:
-        # Load data with error handling
-        data = load_data(data_file, "dataset")
-        codebook = load_data(codebook_file, "codebook")
+    with col2:
+        codebook = st.file_uploader("Upload Codebook (CSV or Excel)", type=['csv', 'xlsx', 'xls'])
+        if codebook:
+            st.session_state['codebook'] = load_file(codebook, "codebook")
+            if st.session_state['codebook'] is not None:
+                st.write("Codebook Preview:")
+                st.dataframe(st.session_state['codebook'].head())
+
+    # Optional study documentation
+    study_docs = st.file_uploader("Upload Study Documentation (Optional)", 
+                                 type=['pdf', 'docx', 'txt'],
+                                 accept_multiple_files=True)
+
+    # Process mappings
+    if st.session_state['data'] is not None and st.session_state['codebook'] is not None:
+        if st.button("Generate Mappings"):
+            with st.spinner("Generating variable mappings..."):
+                try:
+                    if 'mapper' not in st.session_state or st.session_state['mapper'] is None:
+                        st.session_state['mapper'] = VariableMapper(st.session_state['codebook'])
+                    
+                    # Create mappings
+                    st.session_state['mappings'] = st.session_state['mapper'].map_variables(
+                        st.session_state['data']
+                    )
+                    
+                    # Display mappings
+                    display_mappings(
+                        st.session_state['mappings'],
+                        st.session_state['data'],
+                        st.session_state['codebook']
+                    )
+                    
+                    # Clean up memory
+                    gc.collect()
+                    
+                except Exception as e:
+                    st.error(f"Error generating mappings: {str(e)}")
         
-        if data is not None and codebook is not None:
-            # Create study context
-            study_context = StudyContext()
-            
-            # Process study documents if uploaded
-            if study_docs:
-                doc_dir = Path("study_docs")
-                doc_dir.mkdir(exist_ok=True)
-                
-                for doc in study_docs:
-                    doc_path = doc_dir / doc.name
-                    with open(doc_path, "wb") as f:
-                        f.write(doc.getvalue())
-                    try:
-                        study_context.add_document(str(doc_path))
-                    except Exception as e:
-                        st.warning(f"Error processing document {doc.name}: {str(e)}")
-            
-            # Initialize mapper
-            mapper = VariableMapper(codebook, study_context)
-            
-            # Display data preview
-            st.subheader("Dataset Preview")
-            st.dataframe(data.head())
-            
-            st.subheader("Codebook Preview")
-            st.dataframe(codebook.head())
-            
-            # Get embeddings
-            variable_texts = [f"{var}: {study_context.get_variable_context(var)}" 
-                            for var in data.columns]
-            codebook_texts = [f"{row['Variable Name']}: {row.get('Description', '')}" 
-                            for _, row in codebook.iterrows()]
-            doc_texts = study_context.get_all_contexts() if study_docs else []
-            
-            variable_embeddings = compute_embeddings(variable_texts)
-            codebook_embeddings = compute_embeddings(codebook_texts)
-            study_doc_embeddings = compute_embeddings(doc_texts) if doc_texts else np.array([])
-            
-            # Create visualization
-            if len(study_doc_embeddings) > 0:
-                fig = plot_semantic_space(
-                    variable_embeddings, 
-                    codebook_embeddings,
-                    study_doc_embeddings,
-                    data.columns,
-                    codebook['Variable Name'].tolist(),
-                    doc_texts
-                )
-                st.plotly_chart(fig)
-            
-            # Show mappings
-            st.subheader("Variable Mappings")
-            mappings = mapper.map_variables(data)
-            
-            # Display mappings in an interactive table
-            display_mappings(mappings, data, codebook)
+        # Display existing mappings if available
+        elif st.session_state['mappings'] is not None:
+            display_mappings(
+                st.session_state['mappings'],
+                st.session_state['data'],
+                st.session_state['codebook']
+            )
 
 if __name__ == "__main__":
     main()
